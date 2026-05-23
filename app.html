@@ -352,6 +352,19 @@ let myCode=store.get('pvision_code');
 if(!myCode){ myCode=genCode(); store.set('pvision_code',myCode); }
 $('pairCode').textContent=myCode;
 
+// Limpiar la lista actual (deja el equipo listo para una nueva)
+function clearList(){
+  cleanupPlayers();
+  channels=[]; activeIdx=-1;
+  store.set('pvision_lastList','');
+  searchInput.value='';
+  renderChannels();
+  placeholder.style.display='flex';
+  npTitle.textContent='—'; npLabel.textContent='// en espera';
+  npBadge.textContent='standby'; npBadge.className='badge';
+  npLogo.style.display='none';
+}
+
 (function listenRemote(){
   try{
     const es=new EventSource('https://ntfy.sh/m3uplay-'+myCode+'/sse');
@@ -362,6 +375,7 @@ $('pairCode').textContent=myCode;
         const d=JSON.parse(ev.data);
         if(d.event!=='message'||!d.message) return;
         let payload; try{ payload=JSON.parse(d.message); }catch(_){ payload={url:d.message}; }
+        if(payload.cmd==='clear'){ toast('🗑️ Lista eliminada desde el control'); clearList(); return; }
         if(payload.url){ toast('📡 Lista recibida del control'); loadFromUrl(payload.url); }
       }catch(e){}
     };
