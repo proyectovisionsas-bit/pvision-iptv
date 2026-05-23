@@ -11,6 +11,7 @@
   <link rel="apple-touch-icon" href="icon-192.png">
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=Rajdhani:wght@600;700&family=Spline+Sans+Mono:wght@500;600&display=swap');
   :root{
@@ -244,6 +245,20 @@ function renderChannels(filter=''){
   });
 }
 
+let mpegtsPlayer=null;
+const CORS_PROXY='https://corsproxy.io/?url=';
+
+// Si la página es https y el recurso es http, lo enrutamos por proxy (best-effort)
+function resolveUrl(u){
+  if(location.protocol==='https:' && /^http:\/\//i.test(u)) return CORS_PROXY+encodeURIComponent(u);
+  return u;
+}
+function cleanupPlayers(){
+  if(hls){try{hls.destroy();}catch(e){} hls=null;}
+  if(mpegtsPlayer){try{mpegtsPlayer.destroy();}catch(e){} mpegtsPlayer=null;}
+  video.removeAttribute('src'); video.load();
+}
+
 function play(idx){
   const c=channels[idx]; if(!c) return;
   activeIdx=idx; renderChannels(searchInput.value);
@@ -251,17 +266,33 @@ function play(idx){
   npTitle.textContent=c.name; npLabel.textContent='// '+c.group;
   if(c.logo){npLogo.src=c.logo;npLogo.style.display='block';npLogo.onerror=()=>npLogo.style.display='none';}
   else npLogo.style.display='none';
-  const isHls=/\.m3u8(\?|$)/i.test(c.url);
-  npBadge.textContent=isHls?'EN VIVO':'media'; npBadge.className='badge'+(isHls?' live':'');
-  if(hls){hls.destroy();hls=null;} video.removeAttribute('src'); video.load();
+
+  const rawUrl=c.url;
+  const playUrl=resolveUrl(rawUrl);
+  const isHls=/\.m3u8(\?|$)/i.test(rawUrl);
+  const isStandard=/\.(mp4|webm|mkv|mov|mp3|aac|m4a|ogg|flv)(\?|$)/i.test(rawUrl);
+  const isTs = !isHls && !isStandard; // sin extensión conocida → probablemente MPEG-TS / IPTV en vivo
+
+  npBadge.textContent=(isHls||isTs)?'EN VIVO':'media';
+  npBadge.className='badge'+((isHls||isTs)?' live':'');
+
+  cleanupPlayers();
+
   if(isHls){
     if(window.Hls&&Hls.isSupported()){
-      hls=new Hls({lowLatencyMode:true}); hls.loadSource(c.url); hls.attachMedia(video);
+      hls=new Hls({lowLatencyMode:true}); hls.loadSource(playUrl); hls.attachMedia(video);
       hls.on(Hls.Events.MANIFEST_PARSED,()=>video.play().catch(()=>{}));
-      hls.on(Hls.Events.ERROR,(e,d)=>{if(d.fatal)toast('Error al cargar stream.',true);});
-    } else if(video.canPlayType('application/vnd.apple.mpegurl')){ video.src=c.url; video.play().catch(()=>{}); }
+      hls.on(Hls.Events.ERROR,(e,d)=>{if(d.fatal)toast('Error al cargar el canal (puede estar caído o bloqueado).',true);});
+    } else if(video.canPlayType('application/vnd.apple.mpegurl')){ video.src=playUrl; video.play().catch(()=>{}); }
     else toast('Tu navegador no soporta HLS.',true);
-  } else { video.src=c.url; video.play().catch(()=>toast('No se puede reproducir.',true)); }
+  }
+  else if(isTs && window.mpegts && mpegts.getFeatureList().mseLivePlayback){
+    mpegtsPlayer=mpegts.createPlayer({type:'mpegts', isLive:true, url:playUrl}, {enableWorker:true, liveBufferLatencyChasing:true});
+    mpegtsPlayer.attachMediaElement(video);
+    mpegtsPlayer.on(mpegts.Events.ERROR,()=>toast('Error al cargar el canal (formato o bloqueo del navegador).',true));
+    try{ mpegtsPlayer.load(); mpegtsPlayer.play().catch(()=>{}); }catch(e){ toast('No se pudo reproducir este canal.',true); }
+  }
+  else { video.src=playUrl; video.play().catch(()=>toast('No se puede reproducir este medio.',true)); }
 }
 
 function loadFromText(text){
@@ -275,14 +306,24 @@ function loadFromText(text){
 async function loadFromUrl(url){
   if(!url) return;
   toast('Descargando lista…');
-  try{
-    const res=await fetch(url);
-    if(!res.ok) throw new Error();
-    const text=await res.text();
-    loadFromText(text);
-  }catch(err){
-    toast('Error al descargar lista.',true);
+  // Intenta directo y, si falla (CORS o http→https), reintenta por proxies
+  const intentos = location.protocol==='https:' && /^http:\/\//i.test(url)
+    ? ['https://corsproxy.io/?url=','https://api.allorigins.win/raw?url=']   // http en página https: directo se bloquea, ir directo a proxy
+    : ['', 'https://corsproxy.io/?url=','https://api.allorigins.win/raw?url='];
+  for(const p of intentos){
+    try{
+      const finalUrl = p ? p+encodeURIComponent(url) : url;
+      const res=await fetch(finalUrl);
+      if(!res.ok) throw new Error();
+      const text=await res.text();
+      if(text && (text.includes('#EXTINF')||text.includes('#EXTM3U')||/^https?:\/\//im.test(text.trim()))){
+        loadFromText(text);
+        return;
+      }
+      throw new Error('contenido no válido');
+    }catch(err){ /* probar siguiente proxy */ }
   }
+  toast('No se pudo descargar la lista. Verifica la URL.',true);
 }
 
 // Modal
