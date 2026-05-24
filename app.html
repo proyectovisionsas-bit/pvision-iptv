@@ -268,31 +268,55 @@ function play(idx){
   else npLogo.style.display='none';
 
   const rawUrl=c.url;
-  const playUrl=resolveUrl(rawUrl);
   const isHls=/\.m3u8(\?|$)/i.test(rawUrl);
   const isStandard=/\.(mp4|webm|mkv|mov|mp3|aac|m4a|ogg|flv)(\?|$)/i.test(rawUrl);
-  const isTs = !isHls && !isStandard; // sin extensión conocida → probablemente MPEG-TS / IPTV en vivo
+  const isTsExt=/\.ts(\?|$)/i.test(rawUrl);
+  // Xtream "m3u_plus" suele dar URLs sin extensión tipo /user/pass/12345 → tratar como en vivo
+  const isLive = isHls || isTsExt || !isStandard;
 
-  npBadge.textContent=(isHls||isTs)?'EN VIVO':'media';
-  npBadge.className='badge'+((isHls||isTs)?' live':'');
+  npBadge.textContent=isLive?'EN VIVO':'media';
+  npBadge.className='badge'+(isLive?' live':'');
 
   cleanupPlayers();
 
-  if(isHls){
-    if(window.Hls&&Hls.isSupported()){
-      hls=new Hls({lowLatencyMode:true}); hls.loadSource(playUrl); hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED,()=>video.play().catch(()=>{}));
-      hls.on(Hls.Events.ERROR,(e,d)=>{if(d.fatal)toast('Error al cargar el canal (puede estar caído o bloqueado).',true);});
-    } else if(video.canPlayType('application/vnd.apple.mpegurl')){ video.src=playUrl; video.play().catch(()=>{}); }
-    else toast('Tu navegador no soporta HLS.',true);
+  // Estrategia: si es .m3u8 → HLS primero. Si falla, intentar MPEG-TS. Y viceversa.
+  if(isStandard){
+    video.src=resolveUrl(rawUrl);
+    video.play().catch(()=>toast('No se pudo reproducir este medio.',true));
+    return;
   }
-  else if(isTs && window.mpegts && mpegts.getFeatureList().mseLivePlayback){
-    mpegtsPlayer=mpegts.createPlayer({type:'mpegts', isLive:true, url:playUrl}, {enableWorker:true, liveBufferLatencyChasing:true});
-    mpegtsPlayer.attachMediaElement(video);
-    mpegtsPlayer.on(mpegts.Events.ERROR,()=>toast('Error al cargar el canal (formato o bloqueo del navegador).',true));
-    try{ mpegtsPlayer.load(); mpegtsPlayer.play().catch(()=>{}); }catch(e){ toast('No se pudo reproducir este canal.',true); }
-  }
-  else { video.src=playUrl; video.play().catch(()=>toast('No se puede reproducir este medio.',true)); }
+  if(isHls){ tryHls(rawUrl, ()=>tryMpegts(rawUrl, ()=>fail())); }
+  else { tryMpegts(rawUrl, ()=>tryHls(rawUrl, ()=>fail())); }
+
+  function fail(){ toast('No se pudo reproducir el canal (puede estar caído o bloqueado por el navegador).',true); }
+}
+
+function tryHls(rawUrl, onFail){
+  const url=resolveUrl(rawUrl);
+  if(window.Hls && Hls.isSupported()){
+    cleanupPlayers();
+    hls=new Hls({lowLatencyMode:true, manifestLoadingMaxRetry:1, levelLoadingMaxRetry:1});
+    hls.loadSource(url); hls.attachMedia(video);
+    hls.on(Hls.Events.MANIFEST_PARSED,()=>video.play().catch(()=>{}));
+    hls.on(Hls.Events.ERROR,(e,d)=>{ if(d.fatal){ try{hls.destroy();}catch(_){} hls=null; if(onFail)onFail(); } });
+  } else if(video.canPlayType('application/vnd.apple.mpegurl')){
+    video.src=url; video.play().catch(()=>{ if(onFail)onFail(); });
+  } else if(onFail){ onFail(); }
+}
+
+function tryMpegts(rawUrl, onFail){
+  const url=resolveUrl(rawUrl);
+  if(window.mpegts && mpegts.getFeatureList().mseLivePlayback){
+    cleanupPlayers();
+    try{
+      mpegtsPlayer=mpegts.createPlayer({type:'mpegts', isLive:true, url:url}, {enableWorker:true, liveBufferLatencyChasing:true});
+      mpegtsPlayer.attachMediaElement(video);
+      let failed=false;
+      mpegtsPlayer.on(mpegts.Events.ERROR,()=>{ if(failed)return; failed=true; try{mpegtsPlayer.destroy();}catch(_){} mpegtsPlayer=null; if(onFail)onFail(); });
+      mpegtsPlayer.load();
+      mpegtsPlayer.play().catch(()=>{});
+    }catch(e){ if(onFail)onFail(); }
+  } else if(onFail){ onFail(); }
 }
 
 function loadFromText(text){
